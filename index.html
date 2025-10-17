@@ -1,0 +1,207 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TF.js MNIST Prediction</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>MNIST Digit Prediction</h1>
+
+        <!-- Visible canvas is large for easy drawing. We'll downscale to 28x28 before prediction. -->
+        <canvas id="canvas" width="280" height="280" class="draw-canvas"></canvas>
+
+        <div class="controls">
+            <button id="predictBtn">Predict</button>
+            <button id="clearBtn">Clear</button>
+        </div>
+
+        <p id="result">Draw a digit and click Predict!</p>
+        <pre id="diag" style="white-space: pre-wrap; background:#111; color:#eee; padding:8px; border-radius:6px; max-height:220px; overflow:auto;">Diagnostics will appear here.</pre>
+    </div>
+
+
+    <script>
+        let model;
+
+        // Try loading the model from multiple likely locations and provide
+        // detailed console/UI feedback to help debug loading issues.
+        async function loadModel() {
+            const resultEl = document.getElementById('result');
+            const diagEl = document.getElementById('diag');
+
+            if (location.protocol === 'file:') {
+                const msg = 'Warning: opening the page with file:// can block fetch requests. Run a local HTTP server instead.';
+                console.warn(msg);
+                resultEl.innerText = msg;
+            }
+
+            const candidates = [
+                'model.json',
+                './model.json',
+                'mnist_tfjs_model/model.json',
+                './mnist_tfjs_model/model.json',
+                'model/model.json',
+                './model/model.json'
+            ];
+
+            resultEl.innerText = 'Checking model URLs...';
+            diagEl.innerText = 'Checking candidate URLs for accessibility...\n';
+
+            // Pre-check each candidate with fetch to give exact HTTP statuses/errors
+            const accessible = {};
+            for (const path of candidates) {
+                try {
+                    diagEl.innerText += `Fetching ${path} ... `;
+                    const resp = await fetch(path, { method: 'GET' });
+                    if (resp.ok) {
+                        diagEl.innerText += `OK ${resp.status}\n`;
+                        accessible[path] = true;
+                    } else {
+                        diagEl.innerText += `HTTP ${resp.status} ${resp.statusText}\n`;
+                        accessible[path] = false;
+                    }
+                } catch (err) {
+                    // fetch can throw (network error, CORS failure, DNS, etc.)
+                    diagEl.innerText += `ERROR: ${err.message || err}\n`;
+                    accessible[path] = false;
+                }
+            }
+
+            // Try to load the model from the first candidate that was accessible
+            resultEl.innerText = 'Loading model (attempting accessible paths)...';
+            for (const path of candidates) {
+                if (!accessible[path]) continue;
+                try {
+                    console.log(`Attempting to load model from: ${path}`);
+                    model = await tf.loadLayersModel(path);
+                    console.log('Model loaded from', path);
+                    resultEl.innerText = `Model loaded from ${path}`;
+                    diagEl.innerText += `\nModel successfully loaded from: ${path}\n`;
+                    return;
+                } catch (err) {
+                    console.warn(`Failed to load from ${path}:`, err.message || err);
+                    diagEl.innerText += `Failed to load tfjs model from ${path}: ${err.message || err}\n`;
+                    // continue to next accessible candidate
+                }
+            }
+
+            const errMsg = 'Model not found in expected locations. Check that model.json and shard files are served and accessible (check browser console for 404/CORS).';
+            console.error(errMsg);
+            resultEl.innerText = errMsg;
+        }
+
+        loadModel();
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Drawing settings
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvas.width, canvas.height); // black background
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 24; // thick strokes to mimic MNIST pen size
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        let drawing = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        function getPointerPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            if (e.touches && e.touches.length > 0) {
+                return {
+                    x: e.touches[0].clientX - rect.left,
+                    y: e.touches[0].clientY - rect.top
+                };
+            }
+            return {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        }
+
+        function startDrawing(e) {
+            e.preventDefault();
+            drawing = true;
+            const pos = getPointerPos(e);
+            lastX = pos.x;
+            lastY = pos.y;
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+        }
+
+        function draw(e) {
+            if (!drawing) return;
+            e.preventDefault();
+            const pos = getPointerPos(e);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+            lastX = pos.x;
+            lastY = pos.y;
+        }
+
+        function stopDrawing(e) {
+            if (!drawing) return;
+            e && e.preventDefault();
+            drawing = false;
+            ctx.closePath();
+        }
+
+        // Mouse events
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', draw);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseleave', stopDrawing);
+
+        // Touch events
+        canvas.addEventListener('touchstart', startDrawing, { passive: false });
+        canvas.addEventListener('touchmove', draw, { passive: false });
+        canvas.addEventListener('touchend', stopDrawing);
+
+        document.getElementById('clearBtn').addEventListener('click', clearCanvas);
+        document.getElementById('predictBtn').addEventListener('click', predict);
+
+        function clearCanvas() {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            document.getElementById('result').innerText = 'Draw a digit and click Predict!';
+        }
+
+        async function predict() {
+            if (!model) {
+                document.getElementById('result').innerText = 'Model not loaded.';
+                return;
+            }
+
+            // Create an offscreen canvas at 28x28 and draw the large canvas scaled down
+            const off = document.createElement('canvas');
+            off.width = 28;
+            off.height = 28;
+            const offCtx = off.getContext('2d');
+
+            // Draw the current drawing scaled to 28x28
+            offCtx.fillStyle = 'black';
+            offCtx.fillRect(0, 0, off.width, off.height);
+            offCtx.drawImage(canvas, 0, 0, off.width, off.height);
+
+            const imageData = offCtx.getImageData(0, 0, off.width, off.height);
+
+            // Convert to tensor and normalize
+            const tensor = tf.browser.fromPixels(imageData, 1)
+                .toFloat()
+                .div(255.0)
+                .expandDims(); // shape [1,28,28,1]
+
+            const predictionTensor = model.predict(tensor);
+            const prediction = await predictionTensor.data();
+            const result = Array.from(prediction).indexOf(Math.max(...prediction));
+            document.getElementById('result').innerText = `Predicted Digit: ${result} 🎉`;
+        }
+    </script>
+</body>
+</html>
